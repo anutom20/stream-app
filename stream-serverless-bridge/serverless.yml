@@ -3,12 +3,22 @@ frameworkVersion: '3'
 
 provider:
   name: aws
-  runtime: nodejs18.x
+  runtime: nodejs20.x
+  region: 'ap-south-1'
 
 functions:
-  api:
+  hello:
     handler: index.handler
     events:
       - httpApi:
           path: /
           method: get
+  startECSContainer:
+    handler: startECSContainer.handler
+    environment: ${file(env.json)}
+    events:
+      - httpApi:
+          path: /startECSContainer
+          method: post
+plugins:
+  - serverless-offline
