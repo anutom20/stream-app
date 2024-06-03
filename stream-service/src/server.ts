@@ -1,77 +1,72 @@
 import http from "http";
-import path from "path";
-import { spawn } from "child_process";
-import express from "express";
+import { spawn } from "node:child_process";
+import express, { Request, Response } from "express";
 import { Server as SocketIO } from "socket.io";
+import { ChildProcessWithoutNullStreams } from "child_process";
+import { getFfmpegOptions } from "./utils";
 
 const app = express();
 const server = http.createServer(app);
-const io = new SocketIO(server);
+const io = new SocketIO(server, {
+  cors: {
+    origin: "http://localhost:3000",
+  },
+});
 
 const PORT = process.env.PORT ?? 8000;
 
-const options = [
-  "-i",
-  "-",
-  "-c:v",
-  "libx264",
-  "-preset",
-  "ultrafast",
-  "-tune",
-  "zerolatency",
-  "-r",
-  `${25}`,
-  "-g",
-  `${25 * 2}`,
-  "-keyint_min",
-  25,
-  "-crf",
-  "25",
-  "-pix_fmt",
-  "yuv420p",
-  "-sc_threshold",
-  "0",
-  "-profile:v",
-  "main",
-  "-level",
-  "3.1",
-  "-c:a",
-  "aac",
-  "-b:a",
-  "128k",
-  "-ar",
-  128000 / 4,
-  "-f",
-  "flv",
-  `rtmp://a.rtmp.youtube.com/live2/dcfx-m7v2-j248-3185-9207`,
-];
-
-//@ts-ignore
-const ffmpegProcess = spawn("ffmpeg", options);
-
-//@ts-ignore
-ffmpegProcess.stdout.on("data", (data) => {
-  console.log(`ffmpeg stdout: ${data}`);
+app.get("/", (req: Request, res: Response) => {
+  res.send("<h1>Welcome to streaming service...</h1>");
 });
 
-//@ts-ignore
-ffmpegProcess.stderr.on("data", (data) => {
-  console.error(`ffmpeg stderr: ${data}`);
-});
-
-//@ts-ignore
-ffmpegProcess.on("close", (code) => {
-  console.log(`ffmpeg process exited with code ${code}`);
-});
+const ffmpegProcessesMap: Map<string, ChildProcessWithoutNullStreams> =
+  new Map();
 
 io.on("connection", (socket) => {
   console.log("Socket Connected", socket.id);
+
+  const streamKey = socket.handshake.query.streamKey as string;
+
+  const options = getFfmpegOptions(streamKey);
+
+  const ffmpegProcess = spawn("ffmpeg", options);
+
+  ffmpegProcessesMap.set(socket.id, ffmpegProcess);
+
+  ffmpegProcess.stdout.on("data", (data) => {
+    console.log(`ffmpeg stdout: ${data}`);
+  });
+
+  ffmpegProcess.stderr.on("data", (data) => {
+    console.error(`ffmpeg stderr: ${data}`);
+  });
+
+  ffmpegProcess.on("close", (code) => {
+    console.log(`ffmpeg process exited with code ${code}`);
+    ffmpegProcessesMap.delete(socket.id);
+  });
+
   socket.on("binarystream", (stream) => {
-    console.log("Binary Stream Incommming...");
-    //@ts-ignore
-    ffmpegProcess.stdin.write(stream, (err) => {
-      console.log("Err", err);
-    });
+    console.log("Binary Stream Incoming...");
+    if (ffmpegProcess.stdin.writable) {
+      ffmpegProcess.stdin.write(stream, (err) => {
+        if (err) {
+          console.log("Error writing to ffmpeg stdin:", err);
+        }
+      });
+    }
+  });
+
+  socket.on("disconnect", (reason) => {
+    console.log(`Socket disconnected, reason=${reason}`);
+    if (ffmpegProcessesMap.has(socket.id)) {
+      console.log(`exiting ffmpeg process related to socket_id=${socket.id}`);
+      ffmpegProcessesMap.get(socket.id)!.kill("SIGINT");
+    }
+  });
+
+  socket.on("stopStream", () => {
+    socket.disconnect();
   });
 });
 
